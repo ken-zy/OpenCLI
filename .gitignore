@@ -25,3 +25,6 @@ docs/.vitepress/cache
 *.db
 autoresearch/results/
 autoresearch-results.tsv
+
+# Local skill workspaces (cso security reports, etc)
+.gstack/

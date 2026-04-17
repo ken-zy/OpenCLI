@@ -1,0 +1,141 @@
+{
+  "version": "2.0.0",
+  "date": "2026-04-17T13:07:48Z",
+  "mode": "daily",
+  "scope": "full",
+  "project": "@jackwener/opencli 1.7.4",
+  "diff_mode": false,
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14],
+  "question": "Backdoor check + install safety",
+  "verdict": "NO_BACKDOOR_DETECTED — install is safe with documented trade-offs",
+  "attack_surface": {
+    "code": {
+      "daemon_http_endpoints": 5,
+      "daemon_ws_endpoints": 1,
+      "listen_interface": "127.0.0.1:19825",
+      "external_fetch_callouts": 0,
+      "child_process_user_tainted": 0
+    },
+    "infrastructure": {
+      "ci_workflows": 7,
+      "secret_management": "GitHub secrets (NPM_TOKEN, WEBSITE_DEPLOY_TOKEN)",
+      "npm_provenance": true
+    }
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "phase": 5,
+      "phase_name": "Chrome Extension Privilege",
+      "category": "Infrastructure",
+      "title": "Browser extension requests maximum-privilege permissions",
+      "file": "extension/manifest.json",
+      "line": 6,
+      "description": "The MV3 extension declares debugger + tabs + cookies + <all_urls>. debugger grants full CDP access — equivalent to reading/modifying every HTTP request, DOM, and credential across every site the user visits.",
+      "exploit_scenario": "If the extension update channel or distribution ZIP is compromised (supply chain), a malicious release could silently siphon cookies/sessions from any site. Chrome shows a yellow 'debugger is attached' banner while CDP is in use, which is a visible but easy-to-miss mitigation.",
+      "impact": "Worst-case: full browser session theft. Realistic given current code: none (code is transparent, no exfiltration paths found).",
+      "recommendation": "These permissions are REQUIRED for the stated functionality (browser automation via CDP). Users should: (1) install only from official npm/GitHub releases, (2) watch for the debugger banner, (3) only run in a Chrome profile without sensitive logged-in sessions if possible."
+    },
+    {
+      "id": 2,
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "phase": 4,
+      "phase_name": "CI/CD Pipeline",
+      "category": "CI/CD",
+      "title": "Third-party GitHub Actions pinned by tag, not SHA",
+      "file": ".github/workflows/release.yml",
+      "line": 48,
+      "description": "softprops/action-gh-release@v3.0.0 and peter-evans/repository-dispatch@v4 are pinned by semver tag. Tags can be force-moved by the action author or a compromised account.",
+      "exploit_scenario": "If either third-party action is compromised, the release workflow has access to NPM_TOKEN and could publish a poisoned npm tarball under @jackwener/opencli.",
+      "impact": "Supply chain attack on downstream users who run `npm install -g @jackwener/opencli`.",
+      "recommendation": "Pin to full commit SHA (e.g., `softprops/action-gh-release@<40-char-sha>`) and use Renovate/Dependabot for updates. First-party actions (actions/checkout@v6, actions/setup-node@v6) are lower-risk but ideally also SHA-pinned."
+    },
+    {
+      "id": 3,
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "phase": 5,
+      "phase_name": "Extension distribution",
+      "category": "Infrastructure",
+      "title": "Extension distributed via GitHub Releases + 'Load unpacked'",
+      "file": "README.md",
+      "line": 44,
+      "description": "The browser bridge extension is not published to the Chrome Web Store — users download a ZIP from GitHub Releases and load it as an unpacked extension. This skips Google's (limited) review process.",
+      "exploit_scenario": "A compromised release asset would install without store-level vetting. Mitigated by GitHub Release signatures + the fact that release artifacts are built inside the release.yml workflow.",
+      "impact": "Trust is anchored in the GitHub org (jackwener/opencli) and the release workflow. No independent third-party review.",
+      "recommendation": "Consider publishing to Chrome Web Store for defense-in-depth. Users should verify release source each update."
+    }
+  ],
+  "supply_chain_summary": {
+    "direct_prod_deps": 6,
+    "deps": ["cli-table3", "commander", "js-yaml", "turndown", "undici", "ws"],
+    "critical_cves": 0,
+    "high_cves": 0,
+    "moderate_cves": 0,
+    "npm_audit_result": "found 0 vulnerabilities",
+    "install_scripts_in_prod_deps": "not hydrated — not checked at this level",
+    "own_postinstall": {
+      "script": "scripts/postinstall.js",
+      "behavior": "installs shell completion (bash/zsh/fish), creates ~/.opencli/spotify.env template",
+      "network_calls": false,
+      "filesystem_writes_outside_project": ["~/.zsh/completions/_opencli", "~/.bash_completion.d/opencli", "~/.config/fish/completions/opencli.fish", "~/.opencli/spotify.env"],
+      "verdict": "benign"
+    },
+    "own_fetch_adapters": {
+      "script": "scripts/fetch-adapters.js",
+      "behavior": "syncs adapter manifest, cleans stale local overrides; only runs on global install",
+      "network_calls": false,
+      "verdict": "benign (misnamed — it does NOT fetch from network)"
+    },
+    "own_preuninstall": {
+      "script": "inline in package.json",
+      "behavior": "POST http://127.0.0.1:19825/shutdown to stop local daemon on uninstall",
+      "verdict": "benign"
+    },
+    "lockfile_present": true,
+    "lockfile_tracked": true,
+    "lockfile_integrity_entries": 291,
+    "npm_provenance": true
+  },
+  "backdoor_indicators_searched": {
+    "obfuscated_code": "none found",
+    "eval_of_network_content": "none found",
+    "base64_or_hex_payloads": "none suspicious (only crypto.createHash outputs)",
+    "external_exfiltration_endpoints": "none — all fetch targets are 127.0.0.1 or explicit per-adapter sites",
+    "hidden_backdoor_accounts": "n/a (no user system)",
+    "dynamic_require_of_untrusted": "none found",
+    "hardcoded_credentials": "none (only AWS docs placeholder AKIAIOSFODNN7EXAMPLE in test fixtures)",
+    "reverse_shell_patterns": "none found",
+    "telemetry_or_analytics": "none detected"
+  },
+  "daemon_security_design": {
+    "listen_address": "127.0.0.1 only (loopback)",
+    "csrf_defenses": [
+      "Origin header check (rejects non chrome-extension:// origins)",
+      "X-OpenCLI custom header required on all endpoints except /ping",
+      "No Access-Control-Allow-Origin response header (CORS default-deny)",
+      "1 MB body size limit",
+      "WebSocket verifyClient rejects browser origins"
+    ],
+    "endpoints": ["/ping GET", "/status GET", "/logs GET", "/logs DELETE", "/shutdown POST", "/command POST", "/ext WS"],
+    "assessment": "defense-in-depth, intentional design"
+  },
+  "filter_stats": {
+    "candidates_scanned": 11,
+    "hard_exclusion_filtered": 3,
+    "confidence_gate_filtered": 5,
+    "reported": 3
+  },
+  "totals": { "critical": 0, "high": 0, "medium": 2, "low": 1, "tentative": 0 },
+  "trend": {
+    "prior_report_date": null,
+    "resolved": 0, "persistent": 0, "new": 3,
+    "direction": "first_run"
+  }
+}
