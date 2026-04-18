@@ -8,6 +8,30 @@ tags: [opencli, cli, browser, web, chrome-extension, cdp, bilibili, twitter, red
 
 # OpenCLI Usage Guide
 
+> **本项目约定：0号浏览器预检（jdy / Main 项目，2026-04-18）**
+>
+> **触发预检的命令**（走 BrowserBridge，必须连 0号 Chrome）：
+>
+> - `opencli browser <subcmd>` — 全部 browser 子命令
+> - **opencli 顶层浏览器工具命令**：`explore`（alias `probe`）/ `generate` / `record` / `cascade`（经精确 grep 验证走 BrowserBridge；`synthesize` 是纯本地文件处理，不走浏览器）
+> - `opencli <site> <cmd>` — 当该 site 的 strategy **不是** `PUBLIC` / `LOCAL`（即本文命令表中标 🌐 / 🖥️ 的条目）
+> - **兜底**：如果无法确定某命令是否走浏览器，默认预检（代价：几秒检查 vs 连错浏览器的调试时间）
+>
+> 预检执行：
+>
+> ```bash
+> bash /Users/jdy/Documents/Main/.claude/scripts/preflight_profile0.sh
+> ```
+>
+> 脚本会自动：① 通过 daemon `/status` 判定扩展就绪；② 需要时启动 0号；③ 若扩展未连上 daemon 给出 Load unpacked / 排查指引。失败会报错并给清理指令。
+>
+> **以下命令无需预检**（本文命令表中标 ✅ Public API / 🔧 External CLI 的条目，不走浏览器）：
+> `hackernews` · `v2ex`（public 子命令）· `arxiv` · `lobsters` · `google` · `wikipedia` · `bbc` · `sinafinance` · `devto` · `producthunt` · `imdb` · `lesswrong` · `hf` · `stackoverflow` · `steam` · `apple-podcasts` · `dictionary` · `paperreview`，以及所有 `opencli <cli>` passthrough（`gh` / `docker` / `lark-cli` / `vercel` / `dws` / `wecom-cli` / `obsidian`）。可用 `opencli list -f yaml` 查看目标 site 的 strategy。
+>
+> **权威判据**：以 daemon `/status` 的 `extensionConnected` 为准。**不要**依赖 `opencli doctor` 的退出码（只打印报告，不设 exitCode）。
+>
+> 不得在主 Chrome 或 `profile_1~6` 中运行 opencli —— 其他实例未装扩展，不参与自动化。
+
 > Make any website or Electron App your CLI. Reuse Chrome login, zero risk, AI-powered discovery.
 
 ## Install & Run
