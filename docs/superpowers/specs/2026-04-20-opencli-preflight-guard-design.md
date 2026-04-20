@@ -107,7 +107,15 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 [3] 递归展开 shell wrapper
     检测：shlex 分词后若出现 {bash, zsh, sh} 配 {-c, -lc, -ic} 且 next token 是字符串
     展开：对该字符串递归应用 [3]→[4]→[5]
-    展开失败（引号不闭合、嵌套深度 > 3）→ fail-closed
+    
+    深度定义（从 0 计）：
+      深度 0 = 原始命令（无 wrapper）
+      深度 1 = 一层 wrapper，如 `bash -c 'opencli x'`
+      深度 2 = 两层嵌套，如 `bash -c 'bash -c "opencli x"'`
+      ...
+    
+    允许上限：深度 1（允许一层 wrapper；深度 ≥ 2 直接 fail-closed）
+    其他 fail-closed：引号不闭合、shell 解析错误
 
 [4] shlex 分词 effective command
     shlex 抛错 → fail-closed
@@ -116,7 +124,10 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
     （basename 取末段，支持 npx opencli / /usr/local/bin/opencli）
     跳过环境变量前缀（含 `=`）；排除 opencli-autofix 等非独立匹配
     
-    ├── 找到 0 个（但 [0] 已通过）→ 可能是 heredoc / 字符串嵌套 → fail-closed
+    ├── 找到 0 个 → **fail-open**（exit 0）
+    │     理由：[0] 的 shell grep 会误命中 `opencli-autofix` / `opencli-anything`
+    │     （`-` 在 grep `\b` 语义里是单词边界），但 shlex 分词后发现不是独立
+    │     命令 token，说明 opencli 只是路径名/字符串子串，非真实调用
     └── 对每个 opencli 出现点，取紧邻 next1 / next2 token：
     
         ├── next1 ∈ 顶层 bypass：
@@ -148,7 +159,7 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 | 路径前缀 `npx opencli` / `./node_modules/.bin/opencli` / `/usr/local/bin/opencli` | shlex 分词后 basename 取末段匹配 |
 | 环境变量前缀 `OPENCLI_DEBUG=1 opencli xx` | shlex 作为独立 token，含 `=` 的 token 跳过 |
 | 链式命令 `ls && opencli a && opencli browser state` | 遍历所有 opencli 点；任一 NEED_PREFLIGHT 就跑一次预检 |
-| Shell wrapper `bash -lc 'opencli browser state'` / `zsh -c "opencli list"` | 在 [3] 递归展开内层字符串；嵌套深度上限 3，超限 fail-closed |
+| Shell wrapper `bash -lc 'opencli browser state'` / `zsh -c "opencli list"` | 在 [3] 递归展开内层字符串；允许深度上限 1（一层 wrapper），深度 ≥ 2 fail-closed |
 | 子命令 flag 混入 `opencli xiaohongshu hot --limit 10` | 只看 next1、next2（site、cmd），忽略 `--` flag |
 | `opencli browser <任何子命令>`（含 `init` / `verify` / `state`） | 全部 NEED_PREFLIGHT（都读浏览器页面） |
 | `opencli verify <site>/<name>` | NEED_PREFLIGHT（跑 adapter 可能走浏览器；保守） |
@@ -171,7 +182,7 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 | `[2]` stdin JSON 解析失败但 [0] 已确认含 opencli | **fail-closed** | 解析失败说明 hook 输入协议错乱，不能放行 opencli 调用 |
 | `[3]` wrapper 展开失败（引号不闭合 / 嵌套超限） | **fail-closed** | 无法判断内层实际执行什么，保守阻断 |
 | `[4]` shlex 抛错 | **fail-closed** | 同上 |
-| `[5]` 命令含 `opencli` 子串但分词后找不到独立 token | **fail-closed** | 可能是 heredoc / 复杂嵌套，无法保证 |
+| `[5]` 命令含 `opencli` 子串但分词后找不到独立 token | **fail-open**（exit 0） | 说明 opencli 是路径名/字符串子串（如 `opencli-autofix`、`echo "opencli xxx"`），非真实调用 |
 | `[5]` bypass 命中 | **fail-open**（exit 0） | 明确无需预检 |
 | `[6]` preflight 正常运行 exit 1 | **fail-closed** | 明确扩展未连 |
 | `[6]` preflight 正常运行 exit 0 | **fail-open**（exit 0） | 就绪放行 |
@@ -299,7 +310,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 >
 > 脚本会自动：① 通过 daemon `/status` 判定扩展就绪；② 需要时启动 0号；③ 若扩展未连上 daemon 给出 Load unpacked / 排查指引。失败会报错并给清理指令。
 >
-> **无需预检的命令**（`browser: false`，不走浏览器）：管理子命令（`list` / `doctor` / `daemon` / `help` / `synthesize` / `version`）、以及 `opencli list -f json` 中 `browser: false` 的全部命令（如 `hackernews/*` · `v2ex/hot` · `google/news` · `bloomberg/*` 等）。精确白名单见 `~/.claude/scripts/opencli_bypass_commands.txt`（由 `gen-bypass-list.sh` 一键重生）。
+> **无需预检的命令**（`browser: false`，不走浏览器）：管理子命令（`list` / `doctor` / `daemon` / `help` / `synthesize` / `validate` / `completion` / `plugin` / `version`）、以及 `opencli list -f json` 中 `browser: false` 的全部命令（如 `hackernews/*` · `v2ex/hot` · `google/news` · `bloomberg/*` 等）。精确白名单见 `~/.claude/scripts/opencli_bypass_commands.txt`（由 `gen-bypass-list.sh` 一键重生）。
 >
 > 不得在主 Chrome 或 profile_1~6 中运行 opencli —— 其他实例未装扩展，不参与自动化。
 ```
@@ -491,8 +502,9 @@ cp ~/.claude/settings.json.backup ~/.claude/settings.json
    
 2. **Hook `timeout` 超时语义实测**
    - 临时将 `preflight_profile0.sh` 第一行改为 `sleep 60` 模拟超时
-   - 喂 `opencli browser state` 观察：Claude Code 是（A）超时后放行、（B）超时后阻断、还是（C）超时后非 0 exit 但放行
-   - 预期：B 或 C 均可接受；A 需调整 timeout 值或改 guard 内部 `timeout` 命令兜底
+   - 喂 `opencli browser state` 观察：Claude Code 是（A）超时后放行、（B）超时后阻断、还是（C）超时后把 hook 算作非 0 exit 但仍放行 Bash
+   - **唯一可接受结果：B（阻断）**。A 和 C 都违背"0 失误"不变量
+   - 若实测是 A 或 C：在 guard 脚本内用 `timeout 10 bash "$PREFLIGHT_SCRIPT"` 兜底，超时即 fail-closed；settings.json 的 timeout 设为 `timeout: 20` 给 guard 自身的兜底留余量
    
 3. **Wrapper 递归展开实测**
    - 测试 case 表里的 `bash -lc "opencli browser state"` 真的触发预检
