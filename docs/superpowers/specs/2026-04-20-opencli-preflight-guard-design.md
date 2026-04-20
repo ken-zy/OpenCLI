@@ -129,13 +129,18 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 [4] shlex 分词 effective command
     shlex 抛错 → fail-closed
 
-[5] 按 shell command boundary 分段，只看每段的 argv[0]
+[5] 按 shell command boundary 分段，解析每段的真实 argv[0]
     - 分隔符 {`&&` `||` `|` `;` `&`} 切分成 command segments
-    - 每段跳过 `FOO=bar` env-assignment 前缀，取第一个非-env token 作为 argv[0]
-    - 只有当 basename(argv[0]) == "opencli" 时才进入 classify
-    - 若 argv[0] 是 `bash/zsh/sh` 且后跟 `-c/-lc/-ic`，递归 scan 内层字符串
-    - 其他 argv[0] 的 segment 跳过（避免误把 `echo opencli` / `echo /usr/local/bin/opencli`
-      / `echo bash -lc "opencli ..."` 这类文本参数当成真实调用）
+    - 在每段内，按顺序跳过：
+      · `FOO=bar` env-assignment 前缀
+      · 透明 exec-forwarding 前缀 {env / command / exec / npx}，以及它们后续的
+        flags、env-assignments、`--package PKG` 等参数，直到下一个真实命令 token
+    - 取到真实 argv[0] 后：
+      · basename(argv[0]) == "opencli" → 进入 classify（支持 `npx opencli`、
+        `env FOO=1 opencli`、`command opencli`、`/usr/local/bin/opencli` 等形式）
+      · basename(argv[0]) ∈ WRAPPER_SHELLS 且后跟 `-c/-lc/-ic` → 递归 scan 内层
+      · 其他 argv[0] → 该 segment 跳过（避免误把 `echo opencli` / `echo /usr/local/bin/opencli`
+        / `echo bash -lc "opencli ..."` 这类文本参数当成真实调用）
     
     ├── 所有 segments 的 argv[0] 都不是 opencli/shell-wrapper → **fail-open**（exit 0）
     │     理由：[0] 的 shell grep 匹配的"opencli"只出现在参数位（`echo opencli`、
