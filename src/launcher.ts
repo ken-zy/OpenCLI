@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import type { ElectronAppEntry } from './electron-apps.js';
 import { getElectronApp } from './electron-apps.js';
 import { confirmPrompt } from './tui.js';
-import { CommandExecutionError } from './errors.js';
+import { CommandExecutionError, getErrorMessage } from './errors.js';
 import { log } from './logger.js';
 
 const POLL_INTERVAL_MS = 500;
@@ -75,6 +75,45 @@ export function killProcess(processName: string): void {
 
   try {
     execFileSync('pkill', ['-9', '-x', processName], { stdio: 'pipe' });
+  } catch {
+    // Ignore
+  }
+}
+
+/**
+ * Quit a macOS GUI app via Apple Event (kAEQuitApplication), then poll for exit.
+ * Falls back to SIGKILL if the app does not respond within the grace period.
+ *
+ * Why Apple Event instead of pkill on darwin: Electron's startup detects
+ * "process was launched outside of LaunchServices" and self-registers via
+ * LSOpenApplication. Sending SIGTERM via pkill prompts the OS to launch the
+ * canonical LaunchServices instance alongside the spawn-process, leaving
+ * two Codex/Cursor/etc. running. Apple Event quit traverses the user-intent
+ * path that Electron handles cleanly without that side effect.
+ */
+export function quitAppGracefully(displayName: string): void {
+  if (process.platform !== 'darwin') {
+    return killProcess(displayName);
+  }
+  try {
+    execFileSync(
+      'osascript',
+      ['-e', `tell application "${displayName}" to quit saving no`],
+      { stdio: 'pipe' },
+    );
+  } catch {
+    // Apple Event may fail if app is not responding; we still poll + fall back below.
+  }
+
+  const deadline = Date.now() + KILL_GRACE_MS;
+  while (Date.now() < deadline) {
+    if (!detectProcess(displayName)) return;
+    execFileSync('sleep', ['0.2'], { stdio: 'pipe' });
+  }
+
+  // App refused to quit gracefully; fall back to SIGKILL.
+  try {
+    execFileSync('pkill', ['-9', '-x', displayName], { stdio: 'pipe' });
   } catch {
     // Ignore
   }
@@ -143,6 +182,24 @@ export async function launchDetachedApp(executable: string, args: string[], labe
       resolve();
     });
   });
+}
+
+/**
+ * Launch a macOS GUI app via LaunchServices (`open -a`) instead of direct
+ * fork-exec. See quitAppGracefully docstring for the duplicate-instance
+ * problem this avoids. macOS only.
+ */
+export async function launchAppViaLaunchServices(displayName: string, args: string[], label: string): Promise<void> {
+  const openArgs = ['-a', displayName];
+  if (args.length > 0) openArgs.push('--args', ...args);
+  try {
+    execFileSync('open', openArgs, { stdio: 'pipe' });
+  } catch (err) {
+    throw new CommandExecutionError(
+      `Could not launch ${label} via LaunchServices`,
+      `'open ${openArgs.join(' ')}' failed: ${getErrorMessage(err)}. Install ${label} or register a custom path in ~/.opencli/apps.yaml.`,
+    );
+  }
 }
 
 export async function launchElectronApp(appPath: string, app: ElectronAppEntry, args: string[], label: string): Promise<void> {
@@ -238,21 +295,26 @@ export async function resolveElectronEndpoint(site: string): Promise<string> {
       );
     }
     process.stderr.write(`  Restarting ${label}...\n`);
-    killProcess(processName);
+    quitAppGracefully(label);
   }
 
-  // Step 3: Discover path
-  const appPath = discoverAppPath(label);
-  if (!appPath) {
-    throw new CommandExecutionError(
-      `Could not find ${label} on this machine.`,
-      `Install ${label} or register a custom path in ~/.opencli/apps.yaml`,
-    );
-  }
-
-  // Step 4: Launch
+  // Step 3 + 4: Launch.
+  // macOS routes through LaunchServices (`open -a`) to avoid Electron's
+  // duplicate-instance side effect. Linux discovers the .app path and spawns
+  // the binary directly.
   const args = [`--remote-debugging-port=${port}`, ...(app.extraArgs ?? [])];
-  await launchElectronApp(appPath, app, args, label);
+  if (process.platform === 'darwin') {
+    await launchAppViaLaunchServices(label, args, label);
+  } else {
+    const appPath = discoverAppPath(label);
+    if (!appPath) {
+      throw new CommandExecutionError(
+        `Could not find ${label} on this machine.`,
+        `Install ${label} or register a custom path in ~/.opencli/apps.yaml`,
+      );
+    }
+    await launchElectronApp(appPath, app, args, label);
+  }
 
   // Step 5: Poll for readiness
   process.stderr.write(`  Waiting for ${label} on port ${port}...\n`);
