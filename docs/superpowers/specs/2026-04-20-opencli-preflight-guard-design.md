@@ -140,6 +140,8 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
         以及它们后续的 flags、env-assignments、per-prefix value-taking flags
         （例：`sudo -u alice`、`nice -n 5`、`npx --package foo`；详见 VALUE_TAKING_FLAGS 表），
         直到下一个真实命令 token
+      · 特例：`npx -c "CMD"` / `npx --call "CMD"` 语义同 `bash -c`（执行内层字符串），
+        需要递归 scan 内层，不能当普通 value-taking flag 吞掉
     - 取到真实 argv[0] 后：
       · basename(argv[0]) == "opencli" → 进入 classify（支持 `npx opencli`、
         `env FOO=1 opencli`、`command opencli`、`/usr/local/bin/opencli` 等形式）
