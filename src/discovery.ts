@@ -24,8 +24,8 @@ export const USER_OPENCLI_DIR = path.join(os.homedir(), '.opencli');
 export const USER_CLIS_DIR = path.join(USER_OPENCLI_DIR, 'clis');
 /** Plugins directory: ~/.opencli/plugins/ */
 export const PLUGINS_DIR = path.join(USER_OPENCLI_DIR, 'plugins');
-/** Matches files that register commands via cli() or lifecycle hooks */
-const PLUGIN_MODULE_PATTERN = /\b(?:cli|onStartup|onBeforeExecute|onAfterExecute)\s*\(/;
+/** Matches files that register commands via cli() / factory wrappers (make*Command) / lifecycle hooks */
+const PLUGIN_MODULE_PATTERN = /\b(?:cli|make[A-Z]\w*Command|onStartup|onBeforeExecute|onAfterExecute)\s*\(/;
 
 function parseStrategy(rawStrategy: string | undefined, fallback: Strategy = Strategy.COOKIE): Strategy {
   if (!rawStrategy) return fallback;
@@ -230,7 +230,7 @@ async function discoverPluginDir(dir: string, site: string): Promise<void> {
   }));
 }
 
-async function isCliModule(filePath: string): Promise<boolean> {
+export async function isCliModule(filePath: string): Promise<boolean> {
   try {
     const source = await fs.promises.readFile(filePath, 'utf-8');
     return PLUGIN_MODULE_PATTERN.test(source);
