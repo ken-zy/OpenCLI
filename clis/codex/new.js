@@ -1,4 +1,5 @@
 import { cli, Strategy } from '@jackwener/opencli/registry';
+import { ArgumentError, SelectorError, TimeoutError } from '@jackwener/opencli/errors';
 
 // Locate the Codex sidebar project list via fingerprint, not text:
 //   1. Inside <aside> (sidebar scope; reduces collisions with other role=list on the page).
@@ -57,7 +58,10 @@ async function clickProject(page, name) {
     })(${JSON.stringify(name)})
   `);
     if (!result.ok) {
-        throw new Error(`Failed to click project '${name}': ${result.reason}`);
+        throw new SelectorError(
+            `Codex sidebar project '${name}' (${result.reason})`,
+            'The Codex sidebar UI may have changed. Re-run `opencli codex dump` and update clis/codex/new.js.',
+        );
     }
     if (result.wasExpanded === false) {
         // Was collapsed; verify click flipped it to expanded (catches silent UI race).
@@ -89,7 +93,11 @@ async function waitForProjectExpanded(page, name, timeoutMs) {
         if (expanded) return;
         await page.wait(0.1);
     }
-    throw new Error(`Timed out (${timeoutMs}ms) waiting for project '${name}' to expand after click`);
+    throw new TimeoutError(
+        `project '${name}' to expand after click`,
+        timeoutMs / 1000,
+        'Codex sidebar may be unresponsive. Try `opencli codex screenshot` to inspect state.',
+    );
 }
 
 export const newCommand = cli({
@@ -114,7 +122,10 @@ export const newCommand = cli({
         if (kwargs.project !== undefined) {
             target = kwargs.project.trim();
             if (!target) {
-                throw new Error('--project cannot be empty');
+                throw new ArgumentError(
+                    '--project cannot be empty',
+                    'Pass a project name like: --project opencli, or omit --project to use the current context.',
+                );
             }
         }
         if (target) {
@@ -123,8 +134,9 @@ export const newCommand = cli({
                 const list = available.length
                     ? available.map((n) => `  - ${n}`).join('\n')
                     : '  (none detected — is the sidebar collapsed?)';
-                throw new Error(
-                    `Project '${target}' not found in Codex sidebar.\nAvailable projects:\n${list}`,
+                throw new ArgumentError(
+                    `Project '${target}' not found in Codex sidebar`,
+                    `Available projects:\n${list}`,
                 );
             }
             await clickProject(page, target);
