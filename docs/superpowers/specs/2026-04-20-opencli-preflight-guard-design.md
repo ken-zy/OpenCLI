@@ -133,8 +133,10 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
     - 分隔符 {`&&` `||` `|` `;` `&`} 切分成 command segments
     - 在每段内，按顺序跳过：
       · `FOO=bar` env-assignment 前缀
-      · 透明 exec-forwarding 前缀 {env / command / exec / npx}，以及它们后续的
-        flags、env-assignments、`--package PKG` 等参数，直到下一个真实命令 token
+      · 透明 exec-forwarding 前缀 {env / command / exec / npx / time / sudo / nice}，
+        以及它们后续的 flags、env-assignments、per-prefix value-taking flags
+        （例：`sudo -u alice`、`nice -n 5`、`npx --package foo`；详见 VALUE_TAKING_FLAGS 表），
+        直到下一个真实命令 token
     - 取到真实 argv[0] 后：
       · basename(argv[0]) == "opencli" → 进入 classify（支持 `npx opencli`、
         `env FOO=1 opencli`、`command opencli`、`/usr/local/bin/opencli` 等形式）
