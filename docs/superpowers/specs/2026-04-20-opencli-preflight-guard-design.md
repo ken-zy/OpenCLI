@@ -88,21 +88,25 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 ### 决策树（按执行顺序）
 
 ```
-[0] 轻量预筛（shell 层，不启 python）
-    printf '%s' "$command" | grep -qE '\bopencli\b' || exit 0
-    
-    ├── 未含 opencli token → exit 0（明确不是 opencli 调用，fail-open 无风险）
-    └── 含 opencli token → 继续
-
-[1] Self-check（任一失败 → fail-closed，exit 2 + stderr）
+[1] Self-check（不依赖 command，最先跑；任一失败 → fail-closed，exit 2 + stderr）
     - [ -x "$PREFLIGHT_SCRIPT" ]：preflight_profile0.sh 存在且可执行
     - command -v opencli >/dev/null：opencli 在 PATH
     - [ -r "$BYPASS_FILE" ]：bypass list 可读
     
     任一失败 → stderr "guard self-check failed: <项>" + exit 2
+    理由：这些是 guard 运行的前置条件，任何 opencli 调用都需要它们
 
-[2] 解析 stdin JSON → tool_input.command
-    python3 json 失败 → fail-closed（因为 [0] 已确认含 opencli）
+[0] 读 stdin 为原始字节流 → raw_input
+    轻量预筛：printf '%s' "$raw_input" | grep -qE '\bopencli\b' || exit 0
+    
+    ├── 未含 opencli 子串 → exit 0（明确不是 opencli 调用，fail-open 无风险）
+    └── 含 opencli 子串 → 继续
+    
+    注：此处用原始 JSON 字符串做 grep。可能匹配 opencli-autofix 等子串；
+    真实判定由 [5] 的 shlex 独立 token 分析完成。此步是零成本快速退出。
+
+[2] python3 解析 raw_input JSON → tool_input.command
+    JSON 解析失败 → fail-closed（因为 [0] 已确认含 opencli 子串）
 
 [3] 递归展开 shell wrapper
     检测：shlex 分词后若出现 {bash, zsh, sh} 配 {-c, -lc, -ic} 且 next token 是字符串
@@ -168,8 +172,8 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 | `opencli doctor` | bypass（预检内部就跑 doctor，避免递归） |
 | `opencli daemon *` | bypass（daemon 管理不读浏览器） |
 | `opencli synthesize <site>` | bypass（纯本地 YAML 合成） |
-| heredoc 内层含 opencli 但 shlex 未解出 | fail-closed（保守） |
 | upstream 新增未知顶层命令 | NEED_PREFLIGHT（保守；后续人工决定是否加入 bypass） |
+| heredoc / 多行命令（`cat <<EOF\nopencli ...\nEOF`） | 依 [4] shlex 结果：抛错 → fail-closed；成功但 [5] 无独立 token → fail-open |
 
 ### Fail-closed vs Fail-open 策略（按调用分类）
 
@@ -504,7 +508,17 @@ cp ~/.claude/settings.json.backup ~/.claude/settings.json
    - 临时将 `preflight_profile0.sh` 第一行改为 `sleep 60` 模拟超时
    - 喂 `opencli browser state` 观察：Claude Code 是（A）超时后放行、（B）超时后阻断、还是（C）超时后把 hook 算作非 0 exit 但仍放行 Bash
    - **唯一可接受结果：B（阻断）**。A 和 C 都违背"0 失误"不变量
-   - 若实测是 A 或 C：在 guard 脚本内用 `timeout 10 bash "$PREFLIGHT_SCRIPT"` 兜底，超时即 fail-closed；settings.json 的 timeout 设为 `timeout: 20` 给 guard 自身的兜底留余量
+   - 若实测是 A 或 C：在 guard 脚本内用 python3 subprocess 兜底（macOS 默认无 GNU `timeout` 命令）：
+     ```python
+     import subprocess
+     try:
+         r = subprocess.run(["bash", PREFLIGHT_SCRIPT], timeout=10, capture_output=True)
+         # 用 r.returncode 和 r.stderr 决定 guard 最终退出
+     except subprocess.TimeoutExpired:
+         sys.stderr.write("preflight timeout after 10s\n")
+         sys.exit(2)  # fail-closed
+     ```
+     settings.json 的 timeout 设为 `timeout: 20` 给 guard 自身的 subprocess 兜底留余量
    
 3. **Wrapper 递归展开实测**
    - 测试 case 表里的 `bash -lc "opencli browser state"` 真的触发预检
