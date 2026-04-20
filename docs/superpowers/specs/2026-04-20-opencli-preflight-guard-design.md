@@ -360,7 +360,8 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 | 修改 | `skills/opencli-oneshot/SKILL.md` | 同上 |
 | 修改 | `skills/opencli-autofix/SKILL.md` | 同上 |
 | 修改 | `skills/smart-search/SKILL.md` | blockquote 整块 + 特例行同步 |
-| 修改 | 项目 `.claude/CLAUDE.md` | 更新 line 63 "唯一正本预检脚本"路径（`Main/.claude/scripts/` → `opencli/scripts/`）+ 新增"harness hook"小节 |
+| 修改 | `skills/opencli-usage/SKILL.md` | blockquote 整块（保留 CLI passthrough 列表 `gh`/`docker`/`lark-cli`/`vercel`/`dws`/`wecom-cli`/`obsidian` + daemon 权威判据说明） |
+| 修改 | 项目 `.claude/CLAUDE.md` | 全节同步 lines 61-72：路径（`Main/.claude/scripts/` → `opencli/scripts/`）+ 判据（旧 `strategy != PUBLIC/LOCAL` → 新 `browser: true`）+ blockquote 来源描述；新增"harness hook 强制层"小节 |
 | 修改 | 项目 `AGENTS.md`（本地私有 untracked） | 同上；顺带修 line 63 typo `.Codex` → `.claude`（迁移后整行重写为新路径） |
 
 ### B. Main repo（直接 commit）
@@ -404,7 +405,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 
 阶段 4：Main repo 收尾（阶段 3 全部通过后）
   4.1 cd Main && git rm 三个原件
-  4.2 commit -m "refactor: migrate opencli-specific docs+script to opencli repo"
+  4.2 commit -m "chore(vault): migrate opencli-specific docs+script to opencli repo"
   4.3 push
 
 阶段 5：opencli PR 合并（/merge-check + /merge-to-main）
@@ -450,7 +451,7 @@ test 'malformed-json'                                                         # 
 # —— timeout 验证（Phase 3 实测项）
 # 临时把 preflight_profile0.sh 改成 `sleep 60` 模拟超时：
 #   验证 hook timeout 行为：Claude Code 是阻断还是放行？
-#   预期：settings.json timeout 15s 应触发阻断语义；若实测放行则需调整策略
+#   预期：guard 脚本内 10s python subprocess timeout 会先于 settings.json timeout: 20s 触发 → exit 2 阻断
 ```
 
 ## 维护流程（upstream rebase）
