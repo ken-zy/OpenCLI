@@ -33,13 +33,29 @@ Claude 要跑 Bash("opencli xxx yyy")
      │
      ▼
 ~/.claude/settings.json hooks.PreToolUse[Bash]
+  + if: "Bash(*opencli*)"      ← Claude Code 层预过滤（含 "opencli" 子串的 Bash 才起 guard）
      │
      ▼
 ~/.claude/scripts/opencli_preflight_guard.sh  ← 本设计新建
      │
-     ├── 解析 stdin JSON（python3）
-     ├── shlex 分词 command，找所有独立 opencli token
-     ├── 查 ~/.claude/scripts/opencli_bypass_commands.txt（站点级/命令级白名单）
+     ├── [0] 轻量 shell 预筛：grep -qE '\bopencli\b' 命令字符串
+     │        不含 → exit 0（双重保险，避免 `if` 字段被旧版 Claude Code 忽略时误阻断所有 Bash）
+     │
+     ├── [1] 启动 self-check（都必须通过，否则 fail-closed）：
+     │        - preflight_profile0.sh 存在且可执行
+     │        - opencli 命令在 PATH
+     │        - opencli_bypass_commands.txt 存在且可读
+     │
+     ├── [2] 解析 stdin JSON（python3）→ 取 tool_input.command
+     │        失败 → fail-closed（因已通过 [0]，命令里有 opencli）
+     │
+     ├── [3] 递归展开 shell wrapper（bash -c / zsh -c / sh -c / -lc 的内层字符串）
+     │        展开失败（引号不平衡等）→ fail-closed
+     │
+     ├── [4] shlex 分词 effective command，找所有独立 opencli token
+     │        shlex 抛错 → fail-closed
+     │
+     ├── [5] 查 ~/.claude/scripts/opencli_bypass_commands.txt 判定每个 opencli 点
      │
      ├── 任一 opencli 点需预检 ─▶ /Users/jdy/Documents/open_sources/opencli/scripts/preflight_profile0.sh
      │                                │
@@ -47,6 +63,16 @@ Claude 要跑 Bash("opencli xxx yyy")
      │                                └── exit 1 (未就绪) ─▶ guard stderr 附带修复指引 + exit 2（阻断）
      │
      └── 全部 bypass ─▶ guard exit 0（放行）
+```
+
+### Source of Truth 层级（防漂移）
+
+```
+Level 1（权威）：本 spec（2026-04-20-opencli-preflight-guard-design.md）
+Level 2（运行时事实）：settings.json + guard 脚本 + bypass_commands.txt + preflight_profile0.sh
+Level 3（派生文档）：5 份 SKILL.md blockquote、AGENTS.md、项目 .claude/CLAUDE.md 的相关段落
+
+Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 spec 修订时，按 Level 3 的文件清单统一 grep 旧路径字面量并替换。
 ```
 
 ### 三个独立改动域
@@ -59,59 +85,98 @@ Claude 要跑 Bash("opencli xxx yyy")
 
 ## Guard 脚本决策逻辑
 
-### 决策树
+### 决策树（按执行顺序）
 
 ```
-stdin JSON 读进来
-    │
-    ├── JSON 解析失败 / shlex 抛错 ─▶ exit 0 (fail-open，基础设施损坏不瘫痪 Bash)
-    │
-    ▼
-python3 shlex 分词 command
-    │
-    ▼
-遍历 tokens，查所有独立 opencli word（basename 取末段，跳过环境变量前缀 FOO=bar，
-排除 opencli-autofix 这种子串非独立匹配）
-    │
-    ├── 未找到任何 opencli token ─▶ exit 0
-    │
-    ▼
-对每个 opencli 出现点，取紧邻 next1 / next2 token：
-    │
-    ├── next1 ∈ {list, doctor, daemon, help, -h, --help,
-    │             synthesize, version, -v, --version}  ─▶ 该点 bypass
-    │
-    ├── next1 ∈ {browser, explore, probe, generate,
-    │             record, cascade}                      ─▶ 该点 NEED_PREFLIGHT
-    │
-    ├── "next1/next2" 命中 opencli_bypass_commands.txt ─▶ 该点 bypass
-    │
-    └── 其他                                             ─▶ 该点 NEED_PREFLIGHT
-    │
-    ▼
-任一 opencli 点命中 NEED_PREFLIGHT ─▶ 调 preflight_profile0.sh
-                                          │
-                                          ├── exit 0 ─▶ guard exit 0
-                                          └── exit 1 ─▶ guard stderr + exit 2
+[0] 轻量预筛（shell 层，不启 python）
+    printf '%s' "$command" | grep -qE '\bopencli\b' || exit 0
+    
+    ├── 未含 opencli token → exit 0（明确不是 opencli 调用，fail-open 无风险）
+    └── 含 opencli token → 继续
+
+[1] Self-check（任一失败 → fail-closed，exit 2 + stderr）
+    - [ -x "$PREFLIGHT_SCRIPT" ]：preflight_profile0.sh 存在且可执行
+    - command -v opencli >/dev/null：opencli 在 PATH
+    - [ -r "$BYPASS_FILE" ]：bypass list 可读
+    
+    任一失败 → stderr "guard self-check failed: <项>" + exit 2
+
+[2] 解析 stdin JSON → tool_input.command
+    python3 json 失败 → fail-closed（因为 [0] 已确认含 opencli）
+
+[3] 递归展开 shell wrapper
+    检测：shlex 分词后若出现 {bash, zsh, sh} 配 {-c, -lc, -ic} 且 next token 是字符串
+    展开：对该字符串递归应用 [3]→[4]→[5]
+    展开失败（引号不闭合、嵌套深度 > 3）→ fail-closed
+
+[4] shlex 分词 effective command
+    shlex 抛错 → fail-closed
+
+[5] 遍历 tokens 找所有独立 opencli word
+    （basename 取末段，支持 npx opencli / /usr/local/bin/opencli）
+    跳过环境变量前缀（含 `=`）；排除 opencli-autofix 等非独立匹配
+    
+    ├── 找到 0 个（但 [0] 已通过）→ 可能是 heredoc / 字符串嵌套 → fail-closed
+    └── 对每个 opencli 出现点，取紧邻 next1 / next2 token：
+    
+        ├── next1 ∈ 顶层 bypass：
+        │     {list, doctor, daemon, help, -h, --help,
+        │      synthesize, validate, completion, plugin,
+        │      version, -v, --version}
+        │     → 该点 bypass
+        │
+        ├── next1 ∈ 顶层 NEED_PREFLIGHT：
+        │     {browser, explore, probe, generate, record, cascade, verify}
+        │     → 该点 NEED_PREFLIGHT
+        │     （注：`verify` 跑任意 adapter，默认预检；`opencli browser verify` 也命中此分支）
+        │
+        ├── "next1/next2" 命中 opencli_bypass_commands.txt
+        │     → 该点 bypass
+        │
+        └── 其他（未知顶层命令 / 不在 bypass list 的 <site>/<cmd>）
+              → 该点 NEED_PREFLIGHT（保守：未知即预检）
+
+[6] 任一 opencli 点命中 NEED_PREFLIGHT → 调 preflight_profile0.sh
+    ├── exit 0（就绪） → guard exit 0（放行）
+    └── exit 1（未就绪）→ 透传 preflight stderr + exit 2（阻断）
 ```
 
 ### 边界处理
 
 | 边界 | 处理 |
 |---|---|
-| 路径前缀 `npx opencli`、`./node_modules/.bin/opencli`、`/usr/local/bin/opencli` | shlex 分词后 basename 取末段匹配 |
-| 环境变量前缀 `OPENCLI_DEBUG=1 opencli xx` | shlex 作为独立 token，含 `=` 的跳过 |
+| 路径前缀 `npx opencli` / `./node_modules/.bin/opencli` / `/usr/local/bin/opencli` | shlex 分词后 basename 取末段匹配 |
+| 环境变量前缀 `OPENCLI_DEBUG=1 opencli xx` | shlex 作为独立 token，含 `=` 的 token 跳过 |
 | 链式命令 `ls && opencli a && opencli browser state` | 遍历所有 opencli 点；任一 NEED_PREFLIGHT 就跑一次预检 |
+| Shell wrapper `bash -lc 'opencli browser state'` / `zsh -c "opencli list"` | 在 [3] 递归展开内层字符串；嵌套深度上限 3，超限 fail-closed |
 | 子命令 flag 混入 `opencli xiaohongshu hot --limit 10` | 只看 next1、next2（site、cmd），忽略 `--` flag |
-| `opencli browser init` / `verify` | 全部 NEED_PREFLIGHT（读浏览器页面） |
-| `opencli doctor` | bypass（预检内部就是跑 doctor，避免递归） |
+| `opencli browser <任何子命令>`（含 `init` / `verify` / `state`） | 全部 NEED_PREFLIGHT（都读浏览器页面） |
+| `opencli verify <site>/<name>` | NEED_PREFLIGHT（跑 adapter 可能走浏览器；保守） |
+| `opencli validate <site>` | bypass（仅 schema 检查，不走浏览器） |
+| `opencli completion` / `opencli plugin ...` | bypass（CLI 管理命令） |
+| `opencli doctor` | bypass（预检内部就跑 doctor，避免递归） |
 | `opencli daemon *` | bypass（daemon 管理不读浏览器） |
 | `opencli synthesize <site>` | bypass（纯本地 YAML 合成） |
+| heredoc 内层含 opencli 但 shlex 未解出 | fail-closed（保守） |
+| upstream 新增未知顶层命令 | NEED_PREFLIGHT（保守；后续人工决定是否加入 bypass） |
 
-### Fail-open vs Fail-closed 策略
+### Fail-closed vs Fail-open 策略（按调用分类）
 
-- **默认 fail-open**：guard 脚本解析失败 / 白名单文件缺失 / preflight 脚本不可执行 → exit 0 + stderr 警告。理由：hook 基础设施坏了不该瘫痪所有 Bash，警告足够 jdy 察觉。
-- **fail-closed**：仅当 preflight 正常运行且明确 exit 1（扩展未连 daemon）→ exit 2 阻断。
+**根本原则**：不变量 "opencli 浏览器命令必须连对浏览器" 优先于 "别把 Bash 弄挂"。
+
+| 场景 | 决策 | 理由 |
+|---|---|---|
+| `[0]` 命令不含 `opencli` token | **fail-open**（exit 0） | 明确无风险，与 guard 无关 |
+| `[1]` self-check 失败（preflight 脚本缺失 / opencli 不在 PATH / bypass list 缺失） | **fail-closed**（exit 2 + stderr 指引） | guard 基础设施坏了，任何 opencli 相关命令都可能连错浏览器 |
+| `[2]` stdin JSON 解析失败但 [0] 已确认含 opencli | **fail-closed** | 解析失败说明 hook 输入协议错乱，不能放行 opencli 调用 |
+| `[3]` wrapper 展开失败（引号不闭合 / 嵌套超限） | **fail-closed** | 无法判断内层实际执行什么，保守阻断 |
+| `[4]` shlex 抛错 | **fail-closed** | 同上 |
+| `[5]` 命令含 `opencli` 子串但分词后找不到独立 token | **fail-closed** | 可能是 heredoc / 复杂嵌套，无法保证 |
+| `[5]` bypass 命中 | **fail-open**（exit 0） | 明确无需预检 |
+| `[6]` preflight 正常运行 exit 1 | **fail-closed** | 明确扩展未连 |
+| `[6]` preflight 正常运行 exit 0 | **fail-open**（exit 0） | 就绪放行 |
+| `[6]` preflight 异常崩溃（非 0/1 exit） | **fail-closed** | preflight 自己错乱，不能假设就绪 |
+| hook timeout（settings.json timeout 触发） | **Phase 3 验证项**（见风险小节） | 需实测决定；spec 默认期望阻断 |
 
 ## 白名单文件
 
@@ -176,6 +241,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
         {
           "type": "command",
           "command": "bash /Users/jdy/.claude/scripts/opencli_preflight_guard.sh",
+          "if": "Bash(*opencli*)",
           "timeout": 15
         }
       ]
@@ -184,11 +250,28 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 }
 ```
 
-### 执行环境注意
+### 字段说明
 
-- **cwd 不保证**：guard 脚本所有引用一律绝对路径。
-- **PATH 可能不含自定义项**：guard 脚本开头显式 `export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH"` 兜底；若 `command -v opencli` 仍失败则 fail-open 放行。
-- **stdin 格式**：Claude Code hook 标准 JSON：`{"tool_name": "Bash", "tool_input": {"command": "..."}, ...}`。
+| 字段 | 语义 | 作用 |
+|---|---|---|
+| `matcher: "Bash"` | Claude Code 只在 Bash tool 调用时启动该 hook chain | 粗筛 |
+| `if: "Bash(*opencli*)"` | Claude Code permission rule 语法（参见官方 hooks 文档）—— Bash 命令字符串含 "opencli" 子串才进 handler | 细筛，避免每个 `ls/git/npm` 都启动 python3 |
+| `command` | 绝对路径调用 guard | 避免 `~` 展开在某些 shell 抽风 |
+| `timeout: 15` | 保守默认值。就绪路径 <100ms；冷启动 ~5s；留 3× 余量 | 见 Phase 3 验证项 |
+
+### 执行环境处理
+
+- **cwd 不保证**：guard 脚本所有引用一律绝对路径，不依赖 cwd。
+- **PATH 可能不含自定义项**：guard 脚本开头显式：
+  ```bash
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH"
+  ```
+  兜底后做 self-check [1]。`command -v opencli` 仍失败 → **fail-closed**（见 Fail-closed 策略）。不再 fail-open，因为命令已被 [0] 判定含 `opencli`，PATH 缺失时无法正确路由。
+- **stdin 格式**：Claude Code hook 标准 JSON：
+  ```json
+  {"tool_name": "Bash", "tool_input": {"command": "..."}, "session_id": "...", ...}
+  ```
+- **`if` 字段兼容性**：若当前 Claude Code 版本不支持 `if` 字段，预期行为是忽略该字段（所有 Bash 都进 handler）。guard 的 [0] 轻量预筛是双重保险：不支持 `if` 时性能稍降但不影响正确性。Phase 3 验证项。
 
 ## 5 份 SKILL.md blockquote 改造
 
@@ -244,16 +327,17 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 
 | 动作 | 路径 | 内容 |
 |---|---|---|
-| 复制 | `scripts/preflight_profile0.sh` | 从 Main/.claude/scripts/ 原样复制 |
-| 复制 | `docs/superpowers/specs/2026-04-18-opencli-profile0-binding-design.md` | 从 Main 原样复制 |
-| 复制 | `docs/superpowers/plans/2026-04-18-opencli-profile0-binding.md` | 从 Main 原样复制 |
-| 新建 | `docs/superpowers/specs/2026-04-20-opencli-preflight-guard-design.md` | 本文件 |
+| 迁入并 patch | `scripts/preflight_profile0.sh` | 从 Main/.claude/scripts/ 迁入；**非原样复制**——需审核 error message 里的 `docs/...` 相对路径仍然成立（迁到 opencli 后"docs/superpowers/..."语义正确，无需修改），但需在 spec review 时确认 |
+| 迁入 | `docs/superpowers/specs/2026-04-18-opencli-profile0-binding-design.md` | 从 Main 迁入；内容不改 |
+| 迁入 | `docs/superpowers/plans/2026-04-18-opencli-profile0-binding.md` | 从 Main 迁入；内容不改 |
+| 新建 | `docs/superpowers/specs/2026-04-20-opencli-preflight-guard-design.md` | 本文件（即当前 spec） |
 | 修改 | `skills/opencli-browser/SKILL.md` | blockquote 整块替换 |
 | 修改 | `skills/opencli-explorer/SKILL.md` | 同上 |
 | 修改 | `skills/opencli-oneshot/SKILL.md` | 同上 |
 | 修改 | `skills/opencli-autofix/SKILL.md` | 同上 |
 | 修改 | `skills/smart-search/SKILL.md` | blockquote 整块 + 特例行同步 |
-| 修改 | 项目 `.claude/CLAUDE.md` | 更新"0号 Chrome 绑定"小节路径 + 新增"harness hook"小节 |
+| 修改 | 项目 `.claude/CLAUDE.md` | 更新 line 63 "唯一正本预检脚本"路径（`Main/.claude/scripts/` → `opencli/scripts/`）+ 新增"harness hook"小节 |
+| 修改 | 项目 `AGENTS.md`（本地私有 untracked） | 同上；顺带修 line 63 typo `.Codex` → `.claude`（迁移后整行重写为新路径） |
 
 ### B. Main repo（直接 commit）
 
@@ -307,19 +391,42 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 ```bash
 test() { echo "$1" | bash ~/.claude/scripts/opencli_preflight_guard.sh; echo "exit=$?"; }
 
-test '{"tool_input":{"command":"ls -la"}}'                                    # 0（非 opencli）
+# —— fail-open（明确非 opencli 或命中 bypass）
+test '{"tool_input":{"command":"ls -la"}}'                                    # 0（非 opencli，[0] 放行）
+test '{"tool_input":{"command":"echo opencli-autofix"}}'                      # 0（子串非独立 token，[5] 无 opencli point）
+test '{"tool_input":{"command":"OPENCLI_DEBUG=1 opencli list"}}'              # 0（env 前缀 + 管理子命令）
 test '{"tool_input":{"command":"opencli list"}}'                              # 0（管理子命令）
 test '{"tool_input":{"command":"opencli doctor"}}'                            # 0（避免递归）
 test '{"tool_input":{"command":"opencli daemon stop"}}'                       # 0
+test '{"tool_input":{"command":"opencli validate hn/top"}}'                   # 0（非浏览器）
+test '{"tool_input":{"command":"opencli completion bash"}}'                   # 0
 test '{"tool_input":{"command":"opencli hackernews top --limit 5"}}'          # 0（bypass list 命中）
 test '{"tool_input":{"command":"opencli v2ex hot"}}'                          # 0
-test '{"tool_input":{"command":"opencli 36kr hot"}}'                          # 0 或 2（browser:true，看预检状态）
+
+# —— fail-open 或 fail-closed（取决于 preflight 状态，0号 Chrome 就绪则 0，否则 2）
+test '{"tool_input":{"command":"opencli 36kr hot"}}'                          # 0 或 2（browser:true）
 test '{"tool_input":{"command":"opencli xiaohongshu search xxx"}}'            # 0 或 2
 test '{"tool_input":{"command":"opencli browser state"}}'                     # 0 或 2
-test '{"tool_input":{"command":"ls && opencli browser open xxx && date"}}'    # 0 或 2（链式命令识别到 browser 触发预检）
-test '{"tool_input":{"command":"echo opencli-autofix"}}'                      # 0（非独立 token）
-test '{"tool_input":{"command":"OPENCLI_DEBUG=1 opencli list"}}'              # 0（env 前缀）
-test 'malformed-json'                                                         # 0（fail-open）
+test '{"tool_input":{"command":"opencli browser init hn/top"}}'               # 0 或 2（browser 子命令）
+test '{"tool_input":{"command":"opencli verify hn/top"}}'                     # 0 或 2（保守：未知 adapter 行为）
+test '{"tool_input":{"command":"ls && opencli browser open xxx && date"}}'    # 0 或 2（链式命令）
+test '{"tool_input":{"command":"opencli explore https://xx.com"}}'            # 0 或 2
+
+# —— wrapper 场景（[3] 递归展开）
+test '{"tool_input":{"command":"bash -lc \"opencli browser state\""}}'        # 0 或 2（内层展开）
+test '{"tool_input":{"command":"zsh -c \"opencli hackernews top\""}}'         # 0（内层 bypass）
+test '{"tool_input":{"command":"sh -c \"opencli xiaohongshu search x\""}}'    # 0 或 2
+
+# —— fail-closed 场景（均应 exit 2）
+test '{"tool_input":{"command":"opencli xiaohongshu hot"}}'                   # 预先临时 chmod -x preflight → 2（self-check [1] 失败）
+test '{"tool_input":{"command":"bash -c \"opencli xx; unclosed-quote"}}'      # 2（wrapper 展开失败）
+test 'malformed-json-with-opencli-word-inside'                                # 2（[0] 含 opencli，[2] 解析失败 → fail-closed）
+test 'malformed-json'                                                         # 0（[0] 不含 opencli，与 guard 无关）
+
+# —— timeout 验证（Phase 3 实测项）
+# 临时把 preflight_profile0.sh 改成 `sleep 60` 模拟超时：
+#   验证 hook timeout 行为：Claude Code 是阻断还是放行？
+#   预期：settings.json timeout 15s 应触发阻断语义；若实测放行则需调整策略
 ```
 
 ## 维护流程（upstream rebase）
@@ -367,17 +474,38 @@ rm -rf ~/.claude/scripts/opencli_*
 cp ~/.claude/settings.json.backup ~/.claude/settings.json
 ```
 
-## 风险与未决点
+## 风险与 Phase 3 验证项
 
-### 已知风险
+### 已知风险（接受）
 
-- **PATH 未包含 opencli**：guard 脚本尝试 `export PATH` 兜底；若仍失败则 fail-open。不致阻塞，但会绕过预检；需要 jdy 在首次启用后 sanity check 一次。
-- **hook timeout 超时语义**：Claude Code 对 hook timeout 的处理未充分验证；spec 默认 15s 保守值。若超时后放行，fail-open；若超时后阻断，可能造成 chrome_multi_instance 启动慢时的短时不可用。需要在阶段 3 验证。
-- **upstream 新增非 browser 类浏览器工具命令**：若 upstream 加入新的顶层命令（如 `opencli capture`），guard 的硬编码子命令列表不知道 → 默认走白名单查询 → 未命中则预检。保守策略，不致漏检。
+- **PATH 未包含 opencli**：guard 脚本 `export PATH` 兜底；仍失败时 fail-closed（阻断 + 指引），不再默默 fail-open。这是主动选择，代价是首次环境异常时 Bash 会短暂不可用直到 jdy 修 PATH。
+- **upstream 新增非 browser 类顶层命令**：若 upstream 加入新顶层命令（如 `opencli capture`），guard 硬编码列表不知道 → 默认走 `<site>/<cmd>` 白名单查询 → 未命中则预检。保守策略不漏检，但可能造成新命令误预检，rebase 时人工 review 加入 bypass list。
+
+### Phase 3 验证项（必须在落地前完成）
+
+以下 4 项任一失败都应阻止 PR 合并：
+
+1. **Hook `if` 字段实测**
+   - 喂 `{"command": "ls"}` 和 `{"command": "opencli list"}`，前者不应启动 guard 进程（通过进程监控或 guard 内打点日志验证）
+   - 若 `if` 被忽略（旧版 Claude Code）：guard `[0]` 轻量预筛兜底，测试 `opencli list` 仍能正确路由
+   
+2. **Hook `timeout` 超时语义实测**
+   - 临时将 `preflight_profile0.sh` 第一行改为 `sleep 60` 模拟超时
+   - 喂 `opencli browser state` 观察：Claude Code 是（A）超时后放行、（B）超时后阻断、还是（C）超时后非 0 exit 但放行
+   - 预期：B 或 C 均可接受；A 需调整 timeout 值或改 guard 内部 `timeout` 命令兜底
+   
+3. **Wrapper 递归展开实测**
+   - 测试 case 表里的 `bash -lc "opencli browser state"` 真的触发预检
+   - 测试嵌套深度：`bash -c 'bash -c "opencli x"'` 应 fail-closed（深度超限）
+   
+4. **Fail-closed 全场景实测**
+   - 临时 `chmod -x preflight_profile0.sh` 喂 `opencli xiaohongshu hot` → 应 exit 2
+   - 临时 `mv opencli_bypass_commands.txt{,.bak}` 喂 `opencli hackernews top` → 应 exit 2
+   - 确认 stderr 包含具体修复指引
 
 ### 未决点
 
-无 —— 设计定稿。
+无 —— 设计定稿。所有开放问题已转化为 Phase 3 验证项。
 
 ## 参考
 
