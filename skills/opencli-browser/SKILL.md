@@ -6,25 +6,28 @@ allowed-tools: Bash(opencli:*), Read, Edit, Write
 
 # OpenCLI Browser — Browser Automation for AI Agents
 
-> **本项目约定：0号浏览器预检（jdy / Main 项目，2026-04-18）**
+> **本项目约定：0号浏览器预检（jdy / Main 项目，2026-04-18；harness hook 兜底 2026-04-20）**
+>
+> **harness 层已强制**：`~/.claude/scripts/opencli_preflight_guard.sh` 作为 PreToolUse hook 自动拦截非 bypass 的 opencli 命令并跑预检，未就绪会 exit 2 阻断 + 回显修复指引。以下文档规则与 hook 行为一致，仅作阅读参考（即便 AI 漏读也由 harness 兜底）。
 >
 > **触发预检的命令**（走 BrowserBridge，必须连 0号 Chrome）：
 >
-> - `opencli browser <subcmd>` — 全部 browser 子命令
-> - **opencli 顶层浏览器工具命令**：`explore`（alias `probe`）/ `generate` / `record` / `cascade`（经精确 grep 验证走 BrowserBridge；`synthesize` 是纯本地文件处理，不走浏览器）
-> - `opencli <site> <cmd>` — 当该 site 的 strategy **不是** `PUBLIC` / `LOCAL`
-> - **兜底**：如果无法确定某命令是否走浏览器，默认预检（代价：几秒检查 vs 连错浏览器的调试时间）
+> **通用规则（先看这条）**：所有 `browser: true` 的 opencli 命令（见 `opencli list -f json` 中 `browser` 字段）。不确定 → 默认预检。
 >
-> 预检执行：
+> 具体已知触发场景（仅举例，**不是穷尽**）：
+>
+> - `opencli browser <subcmd>` — 全部 browser 子命令（含 `init` / `verify`）
+> - `opencli explore` / `probe` / `generate` / `record` / `cascade` — 顶层浏览器工具
+>
+> 预检执行（hook 自动调用；如需手动验证）：
 >
 > ```bash
-> bash /Users/jdy/Documents/Main/.claude/scripts/preflight_profile0.sh
+> bash /Users/jdy/Documents/open_sources/opencli/scripts/preflight_profile0.sh
 > ```
 >
 > 脚本会自动：① 通过 daemon `/status` 判定扩展就绪；② 需要时启动 0号；③ 若扩展未连上 daemon 给出 Load unpacked / 排查指引。失败会报错并给清理指令。
 >
-> **以下命令无需预检**（strategy 为 `PUBLIC` / `LOCAL`，不走浏览器）：
-> `hackernews` · `v2ex` · `arxiv` · `lobsters` · 以及 `opencli list -f yaml` 中 `strategy: PUBLIC` 的所有站点。可通过 `opencli list -f yaml` 查看目标 site 的 strategy。
+> **无需预检的命令**（`browser: false`，不走浏览器）：管理子命令（`list` / `doctor` / `daemon` / `help` / `synthesize` / `validate` / `verify` / `completion` / `plugin` / `version`）、以及 `opencli list -f json` 中 `browser: false` 的全部命令（如 `hackernews/*` · `v2ex/hot` · `google/news` · `bloomberg/*` 等）。精确白名单见 `~/.claude/scripts/opencli_bypass_commands.txt`（由 `gen-bypass-list.sh` 一键重生）。注：此处 `verify` 指顶层 `opencli verify`（仅 validate + optional vitest smoke）；`opencli browser verify` 属于 browser 子命令仍需预检。
 >
 > 不得在主 Chrome 或 profile_1~6 中运行 opencli —— 其他实例未装扩展，不参与自动化。
 
