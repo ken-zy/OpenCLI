@@ -129,15 +129,18 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 [4] shlex 分词 effective command
     shlex 抛错 → fail-closed
 
-[5] 遍历 tokens 找所有独立 opencli word
-    （basename 取末段，支持 npx opencli / /usr/local/bin/opencli）
-    跳过环境变量前缀（含 `=`）；排除 opencli-autofix 等非独立匹配
+[5] 按 shell command boundary 分段，只看每段的 argv[0]
+    - 分隔符 {`&&` `||` `|` `;` `&`} 切分成 command segments
+    - 每段跳过 `FOO=bar` env-assignment 前缀，取第一个非-env token 作为 argv[0]
+    - 只有当 basename(argv[0]) == "opencli" 时才进入 classify
+    - 若 argv[0] 是 `bash/zsh/sh` 且后跟 `-c/-lc/-ic`，递归 scan 内层字符串
+    - 其他 argv[0] 的 segment 跳过（避免误把 `echo opencli` / `echo /usr/local/bin/opencli`
+      / `echo bash -lc "opencli ..."` 这类文本参数当成真实调用）
     
-    ├── 找到 0 个 → **fail-open**（exit 0）
-    │     理由：[0] 的 shell grep 会误命中 `opencli-autofix` / `opencli-anything`
-    │     （`-` 在 grep `\b` 语义里是单词边界），但 shlex 分词后发现不是独立
-    │     命令 token，说明 opencli 只是路径名/字符串子串，非真实调用
-    └── 对每个 opencli 出现点，取紧邻 next1 / next2 token：
+    ├── 所有 segments 的 argv[0] 都不是 opencli/shell-wrapper → **fail-open**（exit 0）
+    │     理由：[0] 的 shell grep 匹配的"opencli"只出现在参数位（`echo opencli`、
+    │     `echo /usr/local/bin/opencli`、`echo bash -lc "opencli ..."`），不是真实调用
+    └── 对每个命令段的 argv[0] 是 opencli 的情形，取紧邻 next1 / next2 token：
     
         ├── next1 ∈ 顶层 bypass：
         │     {list, doctor, daemon, help, -h, --help,
@@ -152,7 +155,14 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
         │     {browser, explore, probe, generate, record, cascade}
         │     → 该点 NEED_PREFLIGHT
         │
-        ├── "next1/next2" 命中 opencli_bypass_commands.txt
+        ├── next1 命中 bypass list 作为站点级（如 `gh` / `docker` / `obsidian` /
+        │      `vercel` / `lark-cli` / `dws` / `wecom-cli` 等 external CLI passthrough）
+        │     → 该点 bypass
+        │
+        ├── "next1/next2" 命中 opencli_bypass_commands.txt 作为命令级
+        │     → 该点 bypass
+        │
+        ├── next1 为空（bare `opencli` 打印 help）
         │     → 该点 bypass
         │
         └── 其他（未知顶层命令 / 不在 bypass list 的 <site>/<cmd>）
@@ -206,7 +216,9 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 
 ### 格式
 
-`~/.claude/scripts/opencli_bypass_commands.txt`，每行一个 `site/cmd`：
+`~/.claude/scripts/opencli_bypass_commands.txt`，支持两种行：
+- `site/cmd` — 命令级 bypass（来自 `opencli list -f json` 中 `browser: false` 的 adapter）
+- `site` — 站点级整站 bypass（来自 `src/external-clis.yaml` 的 external CLI passthrough：`gh` / `docker` / `obsidian` / `vercel` / `lark-cli` / `dws` / `wecom-cli`；这些 CLI 不在 opencli 的 adapter registry，但 `opencli <name>` 走 `executeExternalCli` 透传到系统 CLI，不碰浏览器）
 
 ```
 # 自动生成：2026-04-20 HH:MM:SS
