@@ -88,13 +88,19 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 ### 决策树（按执行顺序）
 
 ```
-[1] Self-check（不依赖 command，最先跑；任一失败 → fail-closed，exit 2 + stderr）
-    - [ -x "$PREFLIGHT_SCRIPT" ]：preflight_profile0.sh 存在且可执行
-    - command -v opencli >/dev/null：opencli 在 PATH
-    - [ -r "$BYPASS_FILE" ]：bypass list 可读
+[1] Self-check（分层：基础层始终检查；bypass 文件延迟检查）
     
-    任一失败 → stderr "guard self-check failed: <项>" + exit 2
-    理由：这些是 guard 运行的前置条件，任何 opencli 调用都需要它们
+    [1a] 基础 self-check（最先跑；任一失败 → fail-closed 但允许顶层管理命令）
+         - [ -x "$PREFLIGHT_SCRIPT" ]：preflight_profile0.sh 存在且可执行
+         - command -v opencli：opencli 在 PATH
+         任一失败 → stderr "guard self-check failed: <项>" + exit 2
+    
+    [1b] bypass 文件检查推迟到 [5] 真正需要查询 <site>/<cmd> 时
+         
+    理由（避免 operational deadlock）：当 bypass 文件损坏时，用户需要能跑
+    `opencli list` / `opencli doctor` / `opencli daemon stop` 等恢复命令；
+    这些命令在 [5] 只用顶层 bypass 判断，不查 `<site>/<cmd>` 文件。
+    把 bypass 文件检查延后到真正要用时，才不会把恢复路径一起锁死。
 
 [0] 读 stdin 为原始字节流 → raw_input
     轻量预筛：printf '%s' "$raw_input" | grep -qE '\bopencli\b' || exit 0
@@ -136,14 +142,16 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
     
         ├── next1 ∈ 顶层 bypass：
         │     {list, doctor, daemon, help, -h, --help,
-        │      synthesize, validate, completion, plugin,
+        │      synthesize, validate, verify, completion, plugin,
         │      version, -v, --version}
         │     → 该点 bypass
+        │     （注：顶层 `opencli verify` 实际只是 validate + optional
+        │      `--smoke`（vitest），不走浏览器，见 src/cli.ts:154 / src/verify.ts:32；
+        │      `opencli browser verify` 走下面 browser 分支命中 NEED_PREFLIGHT）
         │
         ├── next1 ∈ 顶层 NEED_PREFLIGHT：
-        │     {browser, explore, probe, generate, record, cascade, verify}
+        │     {browser, explore, probe, generate, record, cascade}
         │     → 该点 NEED_PREFLIGHT
-        │     （注：`verify` 跑任意 adapter，默认预检；`opencli browser verify` 也命中此分支）
         │
         ├── "next1/next2" 命中 opencli_bypass_commands.txt
         │     → 该点 bypass
@@ -166,7 +174,7 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 | Shell wrapper `bash -lc 'opencli browser state'` / `zsh -c "opencli list"` | 在 [3] 递归展开内层字符串；允许深度上限 1（一层 wrapper），深度 ≥ 2 fail-closed |
 | 子命令 flag 混入 `opencli xiaohongshu hot --limit 10` | 只看 next1、next2（site、cmd），忽略 `--` flag |
 | `opencli browser <任何子命令>`（含 `init` / `verify` / `state`） | 全部 NEED_PREFLIGHT（都读浏览器页面） |
-| `opencli verify <site>/<name>` | NEED_PREFLIGHT（跑 adapter 可能走浏览器；保守） |
+| `opencli verify <site>/<name>` | bypass（顶层 verify 仅 validate + 可选 vitest smoke，不走浏览器；见 src/cli.ts:154 / src/verify.ts:32） |
 | `opencli validate <site>` | bypass（仅 schema 检查，不走浏览器） |
 | `opencli completion` / `opencli plugin ...` | bypass（CLI 管理命令） |
 | `opencli doctor` | bypass（预检内部就跑 doctor，避免递归） |
@@ -182,7 +190,9 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
 | 场景 | 决策 | 理由 |
 |---|---|---|
 | `[0]` 命令不含 `opencli` token | **fail-open**（exit 0） | 明确无风险，与 guard 无关 |
-| `[1]` self-check 失败（preflight 脚本缺失 / opencli 不在 PATH / bypass list 缺失） | **fail-closed**（exit 2 + stderr 指引） | guard 基础设施坏了，任何 opencli 相关命令都可能连错浏览器 |
+| `[1a]` 基础 self-check 失败（preflight 脚本缺失 / opencli 不在 PATH） | **fail-closed**（exit 2 + stderr 指引） | guard 核心基础设施坏了 |
+| `[1b]` bypass 文件缺失，但命令命中顶层 bypass（`list` / `doctor` / `daemon` 等） | **fail-open** | 保留恢复路径；这些命令不查 `<site>/<cmd>` 文件 |
+| `[1b]` bypass 文件缺失，命令要查 `<site>/<cmd>` | **fail-closed**（exit 2 + 指引跑 gen-bypass-list.sh） | 无法判定则保守阻断 |
 | `[2]` stdin JSON 解析失败但 [0] 已确认含 opencli | **fail-closed** | 解析失败说明 hook 输入协议错乱，不能放行 opencli 调用 |
 | `[3]` wrapper 展开失败（引号不闭合 / 嵌套超限） | **fail-closed** | 无法判断内层实际执行什么，保守阻断 |
 | `[4]` shlex 抛错 | **fail-closed** | 同上 |
