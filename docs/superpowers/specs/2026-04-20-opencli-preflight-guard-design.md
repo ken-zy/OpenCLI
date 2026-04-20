@@ -7,7 +7,7 @@
 
 ## 背景
 
-2026-04-18 的 0号 Chrome 绑定方案依赖 5 份 SKILL.md 里的 blockquote 提醒 Claude：「执行 opencli 浏览器相关命令前先跑 `preflight_profile0.sh`」。实际使用中发现：
+2026-04-18 的 0号 Chrome 绑定方案依赖 6 份 SKILL.md 里的 blockquote 提醒 Claude：「执行 opencli 浏览器相关命令前先跑 `preflight_profile0.sh`」。实际使用中发现：
 
 1. 规则是**文档层**的，依赖 Claude 读到并正确理解 blockquote。一旦漏读（长会话 context 靠后、skill 未激活等）就会直接连错浏览器。
 2. blockquote 原来的三条触发场景被视觉层级误导成「枚举完毕」，Claude 遇到 `opencli <site> <cmd>` 形态时常以为「已覆盖前两条就不用预检」。
@@ -41,10 +41,9 @@ Claude 要跑 Bash("opencli xxx yyy")
      ├── [0] 轻量 shell 预筛：grep -qE '\bopencli\b' 命令字符串
      │        不含 → exit 0（双重保险，避免 `if` 字段被旧版 Claude Code 忽略时误阻断所有 Bash）
      │
-     ├── [1] 启动 self-check（都必须通过，否则 fail-closed）：
-     │        - preflight_profile0.sh 存在且可执行
-     │        - opencli 命令在 PATH
-     │        - opencli_bypass_commands.txt 存在且可读
+     ├── [1] Self-check（分层）：
+     │        [1a] 基础（始终检查）：preflight_profile0.sh 存在且可执行 + opencli 在 PATH
+     │        [1b] bypass 文件检查延迟到 [5] 真正查 <site>/<cmd> 时，避免锁死恢复路径
      │
      ├── [2] 解析 stdin JSON（python3）→ 取 tool_input.command
      │        失败 → fail-closed（因已通过 [0]，命令里有 opencli）
@@ -70,7 +69,7 @@ Claude 要跑 Bash("opencli xxx yyy")
 ```
 Level 1（权威）：本 spec（2026-04-20-opencli-preflight-guard-design.md）
 Level 2（运行时事实）：settings.json + guard 脚本 + bypass_commands.txt + preflight_profile0.sh
-Level 3（派生文档）：5 份 SKILL.md blockquote、AGENTS.md、项目 .claude/CLAUDE.md 的相关段落
+Level 3（派生文档）：6 份 SKILL.md blockquote、AGENTS.md、项目 .claude/CLAUDE.md 的相关段落
 
 Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 spec 修订时，按 Level 3 的文件清单统一 grep 旧路径字面量并替换。
 ```
@@ -267,7 +266,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
           "type": "command",
           "command": "bash /Users/jdy/.claude/scripts/opencli_preflight_guard.sh",
           "if": "Bash(*opencli*)",
-          "timeout": 15
+          "timeout": 20
         }
       ]
     }
@@ -282,7 +281,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 | `matcher: "Bash"` | Claude Code 只在 Bash tool 调用时启动该 hook chain | 粗筛 |
 | `if: "Bash(*opencli*)"` | Claude Code permission rule 语法（参见官方 hooks 文档）—— Bash 命令字符串含 "opencli" 子串才进 handler | 细筛，避免每个 `ls/git/npm` 都启动 python3 |
 | `command` | 绝对路径调用 guard | 避免 `~` 展开在某些 shell 抽风 |
-| `timeout: 15` | 保守默认值。就绪路径 <100ms；冷启动 ~5s；留 3× 余量 | 见 Phase 3 验证项 |
+| `timeout: 20` | 保守默认值。就绪路径 <100ms；冷启动 ~5s；留 3× 余量给 guard 自身的 10s python subprocess 超时 | 见 Phase 3 验证项 |
 
 ### 执行环境处理
 
@@ -298,7 +297,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
   ```
 - **`if` 字段兼容性**：若当前 Claude Code 版本不支持 `if` 字段，预期行为是忽略该字段（所有 Bash 都进 handler）。guard 的 [0] 轻量预筛是双重保险：不支持 `if` 时性能稍降但不影响正确性。Phase 3 验证项。
 
-## 5 份 SKILL.md blockquote 改造
+## 6 份 SKILL.md blockquote 改造
 
 ### 4 份一致（browser / explorer / oneshot / autofix）的新 blockquote
 
@@ -386,7 +385,7 @@ echo "[gen-bypass-list] 写入 $OUT ($(wc -l <"$OUT") 行)"
 ```
 阶段 1：opencli repo 准备（feat/preflight-harness-hook 分支）
   1.1 复制（不删 Main 原件——暂保留为回滚兜底）
-  1.2 改 5 份 SKILL.md blockquote（引用 opencli/scripts/ 新路径）
+  1.2 改 6 份 SKILL.md blockquote（引用 opencli/scripts/ 新路径）
   1.3 更新项目 .claude/CLAUDE.md
   1.4 写本 spec
 
@@ -433,7 +432,7 @@ test '{"tool_input":{"command":"opencli 36kr hot"}}'                          # 
 test '{"tool_input":{"command":"opencli xiaohongshu search xxx"}}'            # 0 或 2
 test '{"tool_input":{"command":"opencli browser state"}}'                     # 0 或 2
 test '{"tool_input":{"command":"opencli browser init hn/top"}}'               # 0 或 2（browser 子命令）
-test '{"tool_input":{"command":"opencli verify hn/top"}}'                     # 0 或 2（保守：未知 adapter 行为）
+test '{"tool_input":{"command":"opencli verify hn/top"}}'                     # 0（顶层 verify 仅 validate + optional vitest smoke，非浏览器）
 test '{"tool_input":{"command":"ls && opencli browser open xxx && date"}}'    # 0 或 2（链式命令）
 test '{"tool_input":{"command":"opencli explore https://xx.com"}}'            # 0 或 2
 
@@ -461,7 +460,7 @@ test 'malformed-json'                                                         # 
 cd /Users/jdy/Documents/open_sources/opencli
 git fetch upstream && git rebase upstream/main
 
-# 2. 处理 5 份 SKILL.md blockquote conflict（沿用 .claude/CLAUDE.md 原流程）
+# 2. 处理 6 份 SKILL.md blockquote conflict（沿用 .claude/CLAUDE.md 原流程）
 
 # 3. 重生白名单
 bash ~/.claude/scripts/gen-bypass-list.sh

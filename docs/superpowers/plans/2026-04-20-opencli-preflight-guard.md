@@ -28,7 +28,8 @@
 | Modify | `skills/opencli-oneshot/SKILL.md` | blockquote 替换 |
 | Modify | `skills/opencli-autofix/SKILL.md` | blockquote 替换 |
 | Modify | `skills/smart-search/SKILL.md` | blockquote + 特例行替换 |
-| Modify | `.claude/CLAUDE.md` (line 63-68) | 路径 + 新增 harness hook 小节 |
+| Modify | `skills/opencli-usage/SKILL.md` | blockquote 替换（保留 CLI passthrough 清单 + daemon 权威判据） |
+| Modify | `.claude/CLAUDE.md` (line 61-72) | 全节同步（路径 + 判据 + blockquote 来源）+ 新增 harness hook 小节 |
 | Modify | `AGENTS.md` (line 63) | 修 typo + 同步路径 |
 | 删除 | `Main/.claude/scripts/preflight_profile0.sh` | Phase 3 验证后删 |
 | 删除 | `Main/docs/superpowers/specs/2026-04-18-opencli-profile0-binding-design.md` | Phase 3 验证后删 |
@@ -392,16 +393,27 @@ run_test "opencli list"            '{"tool_input":{"command":"opencli list"}}' 0
 run_test "opencli doctor"          '{"tool_input":{"command":"opencli doctor"}}' 0
 run_test "opencli daemon stop"     '{"tool_input":{"command":"opencli daemon stop"}}' 0
 run_test "opencli validate"        '{"tool_input":{"command":"opencli validate hn/top"}}' 0
+run_test "opencli verify 顶层"      '{"tool_input":{"command":"opencli verify hn/top"}}' 0
 run_test "opencli completion"      '{"tool_input":{"command":"opencli completion bash"}}' 0
+run_test "opencli plugin"          '{"tool_input":{"command":"opencli plugin list"}}' 0
 run_test "bypass list 命中"         '{"tool_input":{"command":"opencli hackernews top --limit 5"}}' 0
 run_test "v2ex/hot bypass"         '{"tool_input":{"command":"opencli v2ex hot"}}' 0
 
 # —— 状态依赖（预检就绪/未就绪）
 run_test "browser:true 36kr/hot"   '{"tool_input":{"command":"opencli 36kr hot"}}' 01
 run_test "browser:true browser"    '{"tool_input":{"command":"opencli browser state"}}' 01
+run_test "browser:true browser verify" '{"tool_input":{"command":"opencli browser verify hn/top"}}' 01
 run_test "browser:true explore"    '{"tool_input":{"command":"opencli explore https://x.com"}}' 01
 run_test "wrapper bash -lc"        '{"tool_input":{"command":"bash -lc \"opencli browser state\""}}' 01
 run_test "wrapper zsh -c bypass"   '{"tool_input":{"command":"zsh -c \"opencli hackernews top\""}}' 0
+
+# —— outer + wrapper 混合（R1-ISSUE 1 回归锁定）
+# 任一 opencli 点 need_preflight 即触发预检（非 return on first wrapper）
+run_test "mixed outer browser + wrapper bypass" \
+         '{"tool_input":{"command":"opencli browser state && bash -lc \"opencli list\""}}' 01
+run_test "mixed outer bypass + wrapper browser" \
+         '{"tool_input":{"command":"opencli list && bash -lc \"opencli browser state\""}}' 01
+run_test "mixed both bypass"       '{"tool_input":{"command":"opencli list && bash -lc \"opencli doctor\""}}' 0
 
 # —— fail-closed（exit 2）
 run_test "wrapper 深度 2"          '{"tool_input":{"command":"bash -c \"bash -c \\\"opencli browser state\\\"\""}}' 2
@@ -952,7 +964,7 @@ git push
 cd /Users/jdy/Documents/open_sources/opencli
 git fetch origin
 git rebase origin/main
-# 若有冲突，按 CLAUDE.md "5 份 SKILL.md blockquote 冲突处理"流程解决
+# 若有冲突，按 CLAUDE.md "6 份 SKILL.md blockquote 冲突处理"流程解决
 git push -u origin feat/preflight-harness-hook --force-with-lease
 ```
 
@@ -965,7 +977,7 @@ gh pr create --base main --title "feat: opencli preflight harness hook + asset m
 
 - PreToolUse hook 强制 0号 Chrome 预检（harness 层兜底 skill blockquote）
 - 迁回 Main vault 里的 opencli 专属 spec/plan/preflight 脚本
-- 5 份 SKILL.md blockquote 精准化（browser:true/false + 通用规则置顶 + harness hook 说明）
+- 6 份 SKILL.md blockquote 精准化（browser:true/false + 通用规则置顶 + harness hook 说明）
 - 项目 .claude/CLAUDE.md 同步新 harness hook 小节
 
 ## Spec / Plan
