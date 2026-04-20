@@ -130,6 +130,9 @@ Level 3 的路径/行为描述必须与 Level 1/2 一致。upstream rebase 或 s
     shlex 抛错 → fail-closed
 
 [5] 按 shell command boundary 分段，解析每段的真实 argv[0]
+    - 用 `shlex.shlex(punctuation_chars=';&|', whitespace_split=True)` 分词，
+      让 `;` `&` `|` 及其复合 `&&` `||` 即便无空白也能成为独立 token（`shlex.split` 会
+      把 `hi&&opencli` 糊成一个 token，丢失第二段命令，故不可用）
     - 分隔符 {`&&` `||` `|` `;` `&`} 切分成 command segments
     - 在每段内，按顺序跳过：
       · `FOO=bar` env-assignment 前缀
