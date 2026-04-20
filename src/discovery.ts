@@ -230,7 +230,7 @@ async function discoverPluginDir(dir: string, site: string): Promise<void> {
   }));
 }
 
-async function isCliModule(filePath: string): Promise<boolean> {
+export async function isCliModule(filePath: string): Promise<boolean> {
   try {
     const source = await fs.promises.readFile(filePath, 'utf-8');
     return PLUGIN_MODULE_PATTERN.test(source);
