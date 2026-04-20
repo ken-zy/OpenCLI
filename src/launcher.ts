@@ -84,6 +84,13 @@ export function killProcess(processName: string): void {
  * Quit a macOS GUI app via Apple Event (kAEQuitApplication), then poll for exit.
  * Falls back to SIGKILL if the app does not respond within the grace period.
  *
+ * Apple Event targeting uses displayName (the LaunchServices app identifier),
+ * while pgrep/pkill targeting uses processName (the executable basename).
+ * For built-in apps these are equal, but ~/.opencli/apps.yaml entries can
+ * decouple them and the wrong identifier silently fails to detect/kill the
+ * old process — which then coexists with the new instance opened by
+ * launchAppViaLaunchServices, defeating the whole point of the graceful quit.
+ *
  * Why Apple Event instead of pkill on darwin: Electron's startup detects
  * "process was launched outside of LaunchServices" and self-registers via
  * LSOpenApplication. Sending SIGTERM via pkill prompts the OS to launch the
@@ -91,9 +98,9 @@ export function killProcess(processName: string): void {
  * two Codex/Cursor/etc. running. Apple Event quit traverses the user-intent
  * path that Electron handles cleanly without that side effect.
  */
-export function quitAppGracefully(displayName: string): void {
+export function quitAppGracefully(displayName: string, processName: string = displayName): void {
   if (process.platform !== 'darwin') {
-    return killProcess(displayName);
+    return killProcess(processName);
   }
   try {
     execFileSync(
@@ -107,13 +114,13 @@ export function quitAppGracefully(displayName: string): void {
 
   const deadline = Date.now() + KILL_GRACE_MS;
   while (Date.now() < deadline) {
-    if (!detectProcess(displayName)) return;
+    if (!detectProcess(processName)) return;
     execFileSync('sleep', ['0.2'], { stdio: 'pipe' });
   }
 
   // App refused to quit gracefully; fall back to SIGKILL.
   try {
-    execFileSync('pkill', ['-9', '-x', displayName], { stdio: 'pipe' });
+    execFileSync('pkill', ['-9', '-x', processName], { stdio: 'pipe' });
   } catch {
     // Ignore
   }
@@ -295,13 +302,16 @@ export async function resolveElectronEndpoint(site: string): Promise<string> {
       );
     }
     process.stderr.write(`  Restarting ${label}...\n`);
-    quitAppGracefully(label);
+    quitAppGracefully(label, processName);
   }
 
   // Step 3 + 4: Launch.
   // macOS routes through LaunchServices (`open -a`) to avoid Electron's
-  // duplicate-instance side effect. Linux discovers the .app path and spawns
-  // the binary directly.
+  // duplicate-instance side effect. Non-darwin attempts direct spawn, but
+  // discoverAppPath() only resolves on darwin (uses osascript), so Linux
+  // Electron app discovery is currently unimplemented and will error out
+  // at the "Could not find {label}" branch below — pre-existing, unrelated
+  // to this fix.
   const args = [`--remote-debugging-port=${port}`, ...(app.extraArgs ?? [])];
   if (process.platform === 'darwin') {
     await launchAppViaLaunchServices(label, args, label);

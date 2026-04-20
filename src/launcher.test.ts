@@ -212,6 +212,55 @@ describe('quitAppGracefully', () => {
     const osascriptCall = cp.execFileSync.mock.calls.find((c) => c[0] === 'osascript');
     expect(osascriptCall?.[1]).toEqual(['-e', 'tell application "My App" to quit saving no']);
   });
+
+  it.skipIf(process.platform !== 'darwin')('on darwin uses processName (not displayName) for pgrep when they differ', () => {
+    cp.execFileSync.mockImplementation((file: string, args?: readonly string[]) => {
+      if (file === 'osascript') return Buffer.alloc(0);
+      if (file === 'pgrep') {
+        // pgrep should be called with the processName arg, not the displayName
+        const err = new Error('exit 1') as Error & { status: number };
+        err.status = 1;
+        throw err;
+      }
+      if (file === 'sleep') return Buffer.alloc(0);
+      throw new Error(`unexpected: ${file} ${args?.join(' ')}`);
+    });
+
+    quitAppGracefully('Friendly Name', 'app-binary');
+
+    // osascript receives displayName
+    const osCall = cp.execFileSync.mock.calls.find((c) => c[0] === 'osascript');
+    expect(osCall?.[1]).toEqual(['-e', 'tell application "Friendly Name" to quit saving no']);
+    // pgrep receives processName (binary basename), not displayName
+    const pgrepCalls = cp.execFileSync.mock.calls.filter((c) => c[0] === 'pgrep');
+    expect(pgrepCalls.length).toBeGreaterThan(0);
+    for (const call of pgrepCalls) {
+      expect(call[1]).toEqual(['-x', 'app-binary']);
+    }
+  });
+
+  it.skipIf(process.platform !== 'darwin')('on darwin falls back to SIGKILL when the app refuses to quit within the grace window', () => {
+    // Simulate clock advancing 250ms per sleep so the loop terminates within ~13 iterations
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    cp.execFileSync.mockImplementation((file: string) => {
+      if (file === 'osascript') return Buffer.alloc(0);
+      if (file === 'pgrep') return Buffer.from('12345\n'); // always alive
+      if (file === 'sleep') {
+        now += 250;
+        return Buffer.alloc(0);
+      }
+      if (file === 'pkill') return Buffer.alloc(0);
+      throw new Error(`unexpected: ${file}`);
+    });
+
+    quitAppGracefully('Codex');
+
+    const pkillCall = cp.execFileSync.mock.calls.find((c) => c[0] === 'pkill');
+    expect(pkillCall).toBeDefined();
+    expect(pkillCall?.[1]).toEqual(['-9', '-x', 'Codex']);
+  });
 });
 
 describe('launchElectronApp', () => {
